@@ -24,6 +24,7 @@ jobs:
       BEITNA_CRON_SECRET: ${{ secrets.BEITNA_CRON_SECRET }}
       INSTAGRAM_SESSIONID: ${{ secrets.INSTAGRAM_SESSIONID }}
       BATCH_LIMIT: '75'
+      FORCE_SYNC: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
