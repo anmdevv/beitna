@@ -15,16 +15,63 @@ const headers = {
   'X-Beitna-Key': SECRET,
 };
 
+let apiPage;
+
+function parseApiText(text) {
+  try { return text ? JSON.parse(text) : {}; }
+  catch { return { raw: text }; }
+}
+
+function looksLikeInfinityFreeChallenge(text) {
+  return /aes\.js|document\.cookie\s*=\s*["']__test=|This site requires Javascript/i.test(String(text || ''));
+}
+
+async function warmInfinityFreeSession(targetUrl = `${SITE}/`) {
+  await apiPage.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  // InfinityFree sets the __test cookie in JavaScript and immediately reloads the URL.
+  // Give that redirect enough time to finish before the API fetch is retried.
+  await apiPage.waitForTimeout(2_500);
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(`${SITE}/api${path}`, {
-    ...options,
-    headers: { ...headers, ...(options.headers || {}) },
-  });
-  const text = await response.text();
-  let data;
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-  if (!response.ok) throw new Error(`Beitna API ${response.status}: ${data.error || text}`);
-  return data;
+  const url = `${SITE}/api${path}`;
+  const method = String(options.method || 'GET').toUpperCase();
+  const body = options.body ?? null;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = await apiPage.evaluate(async ({ url, method, headers, body }) => {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: body == null ? undefined : body,
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      return {
+        status: response.status,
+        ok: response.ok,
+        contentType: response.headers.get('content-type') || '',
+        text: await response.text(),
+      };
+    }, { url, method, headers: { ...headers, ...(options.headers || {}) }, body });
+
+    if (looksLikeInfinityFreeChallenge(result.text)) {
+      console.log(`InfinityFree browser check detected for ${path}; refreshing browser session (attempt ${attempt}/3).`);
+      await warmInfinityFreeSession(method === 'GET' ? url : `${SITE}/`);
+      continue;
+    }
+
+    const data = parseApiText(result.text);
+    if (!result.ok) {
+      throw new Error(`Beitna API ${result.status}: ${data.error || result.text.slice(0, 500)}`);
+    }
+    if (!result.contentType.toLowerCase().includes('json') && data.raw !== undefined) {
+      throw new Error(`Unexpected Beitna API response: ${String(result.text).slice(0, 800)}`);
+    }
+    return data;
+  }
+
+  throw new Error(`InfinityFree browser verification could not be completed for ${path}.`);
 }
 
 function toNumber(value) {
@@ -181,15 +228,6 @@ async function inspectInstagram(context, job) {
   }
 }
 
-const queue = await api(`/automation/instagram-jobs?limit=${LIMIT}`);
-if (!queue || queue.success !== true || !Array.isArray(queue.jobs)) {
-  throw new Error(`Unexpected Beitna API response. Make sure the v19 api folder is uploaded to the live site. Response: ${JSON.stringify(queue).slice(0, 800)}`);
-}
-console.log(`Received ${queue.count || 0} Instagram job(s). API server time: ${queue.serverTime || '-'}; candidates: ${queue.candidateCount ?? '-'}.`);
-if (!queue.jobs.length) {
-  throw new Error('No Instagram jobs were returned. Make sure Instagram links are enabled and saved in video_platform_records, then upload the v19 API patch.');
-}
-
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({
   locale: 'en-US',
@@ -197,6 +235,18 @@ const context = await browser.newContext({
   viewport: { width: 1280, height: 900 },
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 });
+
+apiPage = await context.newPage();
+await warmInfinityFreeSession(`${SITE}/`);
+
+const queue = await api(`/automation/instagram-jobs?limit=${LIMIT}`);
+if (!queue || queue.success !== true || !Array.isArray(queue.jobs)) {
+  throw new Error(`Unexpected Beitna API response. Make sure the v19/v20 API folder is uploaded to the live site. Response: ${JSON.stringify(queue).slice(0, 800)}`);
+}
+console.log(`Received ${queue.count || 0} Instagram job(s). API server time: ${queue.serverTime || '-'}; candidates: ${queue.candidateCount ?? '-'}.`);
+if (!queue.jobs.length) {
+  throw new Error('No Instagram jobs were returned. Make sure Instagram links are enabled and saved in video_platform_records, then upload the v19/v20 API patch.');
+}
 
 if (SESSION_ID) {
   await context.addCookies([
@@ -226,5 +276,6 @@ for (const job of queue.jobs) {
   await new Promise(resolve => setTimeout(resolve, 1_500));
 }
 
+await apiPage.close();
 await browser.close();
 console.log(`Finished: ${succeeded}/${queue.jobs.length} updated.`);
