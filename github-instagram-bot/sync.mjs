@@ -3,7 +3,7 @@ import { chromium } from 'playwright';
 const SITE = String(process.env.BEITNA_SITE_URL || '').replace(/\/$/, '');
 const SECRET = String(process.env.BEITNA_CRON_SECRET || '');
 const SESSION_ID = String(process.env.INSTAGRAM_SESSIONID || '').trim();
-const LIMIT = Math.max(1, Math.min(50, Number(process.env.BATCH_LIMIT || 25)));
+const LIMIT = Math.max(1, Math.min(100, Number(process.env.BATCH_LIMIT || 75)));
 
 if (!SITE || !SECRET) {
   throw new Error('Missing BEITNA_SITE_URL or BEITNA_CRON_SECRET GitHub secret.');
