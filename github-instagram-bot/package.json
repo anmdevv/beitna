@@ -1,0 +1,12 @@
+{
+  "name": "beitna-instagram-stats-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node sync.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
