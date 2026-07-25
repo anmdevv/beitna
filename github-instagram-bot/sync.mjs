@@ -182,8 +182,13 @@ async function inspectInstagram(context, job) {
 }
 
 const queue = await api(`/automation/instagram-jobs?limit=${LIMIT}`);
-console.log(`Received ${queue.count || 0} Instagram job(s).`);
-if (!queue.jobs?.length) process.exit(0);
+if (!queue || queue.success !== true || !Array.isArray(queue.jobs)) {
+  throw new Error(`Unexpected Beitna API response. Make sure the v19 api folder is uploaded to the live site. Response: ${JSON.stringify(queue).slice(0, 800)}`);
+}
+console.log(`Received ${queue.count || 0} Instagram job(s). API server time: ${queue.serverTime || '-'}; candidates: ${queue.candidateCount ?? '-'}.`);
+if (!queue.jobs.length) {
+  throw new Error('No Instagram jobs were returned. Make sure Instagram links are enabled and saved in video_platform_records, then upload the v19 API patch.');
+}
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({
