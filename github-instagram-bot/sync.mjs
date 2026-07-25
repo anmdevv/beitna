@@ -172,6 +172,79 @@ function best(values) {
   return clean.length ? Math.max(...clean) : null;
 }
 
+function consensus(values) {
+  const clean = values.filter(Number.isFinite).filter(v => v >= 0).map(v => Math.trunc(v));
+  if (!clean.length) return null;
+  const counts = new Map();
+  for (const value of clean) counts.set(value, (counts.get(value) || 0) + 1);
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  if (ranked.length === 1 || ranked[0][1] > ranked[1][1]) return ranked[0][0];
+  const sorted = [...clean].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) / 2)];
+}
+
+function directMetric(value, keys) {
+  if (!value || typeof value !== 'object') return null;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const n = toNumber(String(value[key] ?? ''));
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function collectDirectMediaMetrics(media, out) {
+  if (!media || typeof media !== 'object') return;
+  const likes = directMetric(media, ['like_count', 'likes_count', 'likeCount']);
+  const views = directMetric(media, [
+    'play_count', 'plays_count', 'total_play_count', 'view_count', 'views_count',
+    'video_view_count', 'video_views_count', 'video_play_count', 'ig_play_count',
+    'clips_play_count', 'reel_view_count', 'reels_view_count', 'clips_replays_count'
+  ]);
+  const comments = directMetric(media, ['comment_count', 'comments_count']);
+  if (likes !== null) out.likes.push(likes);
+  if (views !== null) out.views.push(views);
+  if (comments !== null) out.comments.push(comments);
+
+  const edgeLikes = toNumber(String(media.edge_media_preview_like?.count ?? media.edge_liked_by?.count ?? ''));
+  const edgeComments = toNumber(String(media.edge_media_to_comment?.count ?? media.edge_media_preview_comment?.count ?? ''));
+  if (edgeLikes !== null) out.likes.push(edgeLikes);
+  if (edgeComments !== null) out.comments.push(edgeComments);
+
+  const username = cleanUsername(media.owner?.username || media.user?.username || media.author?.username || media.username || '');
+  if (username) out.usernames.push(username);
+}
+
+function collectTargetMediaObjects(value, shortcode, mediaId, out, depth = 0, seen = new Set()) {
+  if (depth > 24 || value == null || typeof value !== 'object' || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectTargetMediaObjects(item, shortcode, mediaId, out, depth + 1, seen);
+    return;
+  }
+
+  const codes = [value.shortcode, value.code, value.short_code].filter(Boolean).map(String);
+  const ids = [value.pk, value.id, value.media_id].filter(Boolean).map(v => String(v).split('_')[0]);
+  const isTarget = (shortcode && codes.includes(String(shortcode))) || (mediaId && ids.includes(String(mediaId)));
+  if (isTarget) collectDirectMediaMetrics(value, out);
+
+  for (const child of Object.values(value)) collectTargetMediaObjects(child, shortcode, mediaId, out, depth + 1, seen);
+}
+
+function collectAroundToken(text, token, out) {
+  const source = String(text || '');
+  if (!source || !token) return;
+  let offset = 0;
+  let hits = 0;
+  while (hits < 20) {
+    const index = source.indexOf(token, offset);
+    if (index < 0) break;
+    collectFromText(source.slice(Math.max(0, index - 2500), Math.min(source.length, index + token.length + 5000)), out);
+    offset = index + token.length;
+    hits += 1;
+  }
+}
+
 function shortcodeToMediaId(shortcode) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   let id = 0n;
@@ -186,7 +259,10 @@ function shortcodeToMediaId(shortcode) {
 async function inspectInstagram(context, job) {
   const page = await context.newPage();
   const found = { likes: [], views: [], comments: [], usernames: [] };
+  const trusted = { likes: [], views: [], comments: [], usernames: [] };
   const jsonResponses = [];
+  const shortcode = job.externalId || (job.url.match(/\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/i)?.[1] ?? '');
+  const mediaId = shortcodeToMediaId(shortcode);
 
   page.on('response', async response => {
     const url = response.url();
@@ -210,12 +286,15 @@ async function inspectInstagram(context, job) {
       canonical: document.querySelector('link[rel="canonical"]')?.href || '',
       title: document.title || '',
     }));
-    collectFromText(pageData.text, found);
-    collectFromText(pageData.meta, found);
-    collectFromText(pageData.scripts, found);
-    collectFromText(pageData.html, found);
+    // Only the target post's meta/DOM context is trusted. Scanning the complete Instagram
+    // HTML used to pick numbers from suggested posts and once stored a view count as likes.
+    collectFromText(pageData.meta, trusted);
+    const articleText = await page.locator('article').first().innerText().catch(() => '');
+    collectFromText(articleText, trusted);
+    collectAroundToken(pageData.scripts, shortcode, found);
+    collectAroundToken(pageData.html, shortcode, found);
 
-    for (const payload of jsonResponses) collectKnownNumbers(payload, found);
+    for (const payload of jsonResponses) collectTargetMediaObjects(payload, shortcode, mediaId, trusted);
 
     // Owner username hints from the public page. These are later used to inspect the Reels grid,
     // where Instagram often exposes the play count even when the permalink page only exposes likes.
@@ -231,12 +310,11 @@ async function inspectInstagram(context, job) {
     }
 
     // A logged-in browser session can sometimes access the media info JSON for public posts.
-    const shortcode = job.externalId || (job.url.match(/\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/i)?.[1] ?? '');
 
     // Current Instagram web fallback (PolarisPostRootQuery). Instagram retired the older
     // xdt_shortcode_media query in June 2026. Resolve the live document id from the page
     // module when possible, then fall back to the current and previous known ids.
-    if (shortcode && best(found.views) === null) {
+    if (shortcode && best(trusted.views) === null && best(found.views) === null) {
       const graphqlDocIds = await page.evaluate(() => {
         const ids = [];
         try {
@@ -294,15 +372,14 @@ async function inspectInstagram(context, job) {
             return { status: response.status, text: await response.text() };
           }, { shortcode, docId });
           if (graph.status >= 200 && graph.status < 300) {
-            collectFromText(graph.text, found);
-            try { collectKnownNumbers(JSON.parse(graph.text), found); } catch { /* keep text candidates */ }
+            collectAroundToken(graph.text, shortcode, found);
+            try { collectTargetMediaObjects(JSON.parse(graph.text), shortcode, mediaId, trusted); } catch { /* keep target text candidates */ }
           }
         } catch { /* try the next GraphQL document id */ }
-        if (best(found.views) !== null) break;
+        if (best(trusted.views) !== null || best(found.views) !== null) break;
       }
     }
 
-    const mediaId = shortcodeToMediaId(shortcode);
     if (mediaId) {
       for (const endpoint of [
         `https://www.instagram.com/api/v1/media/${mediaId}/info/`,
@@ -319,9 +396,29 @@ async function inspectInstagram(context, job) {
               'Referer': job.url,
             },
           });
-          if (response.ok()) collectKnownNumbers(await response.json(), found);
+          if (response.ok()) collectTargetMediaObjects(await response.json(), shortcode, mediaId, trusted);
         } catch { /* keep the public-page result */ }
       }
+
+      // The browser-origin request carries the logged-in Instagram cookies exactly as the web app does.
+      try {
+        const mediaInfo = await page.evaluate(async mediaId => {
+          const response = await fetch(`/api/v1/media/${mediaId}/info/`, {
+            credentials: 'include',
+            headers: {
+              'Accept': '*/*',
+              'X-IG-App-ID': '936619743392459',
+              'X-ASBD-ID': '129477',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+          });
+          return { status: response.status, text: await response.text() };
+        }, mediaId);
+        if (mediaInfo.status >= 200 && mediaInfo.status < 300) {
+          try { collectTargetMediaObjects(JSON.parse(mediaInfo.text), shortcode, mediaId, trusted); }
+          catch { collectAroundToken(mediaInfo.text, shortcode, found); }
+        }
+      } catch { /* keep other target-specific sources */ }
     }
 
     // Instagram's embed and legacy JSON variants sometimes contain play_count/video_view_count
@@ -339,14 +436,14 @@ async function inspectInstagram(context, job) {
           headers: { 'Accept': '*/*', 'Referer': job.url, 'X-IG-App-ID': '936619743392459' },
         });
         const body = await response.text();
-        collectFromText(body, found);
-        try { collectKnownNumbers(JSON.parse(body), found); } catch { /* HTML or escaped JSON */ }
+        collectAroundToken(body, shortcode, found);
+        try { collectTargetMediaObjects(JSON.parse(body), shortcode, mediaId, trusted); } catch { /* HTML or escaped JSON */ }
       } catch { /* continue with the next public source */ }
     }
 
     // Last public fallback: locate the same Reel in the owner's Reels grid. The grid frequently
     // exposes a standalone play count on the thumbnail although the permalink page does not.
-    if (shortcode && best(found.views) === null) {
+    if (shortcode && best(trusted.views) === null && best(found.views) === null) {
       const usernames = [...new Set(found.usernames.map(cleanUsername).filter(Boolean))].slice(0, 5);
       for (const username of usernames) {
         for (const profileUrl of [
@@ -375,34 +472,61 @@ async function inspectInstagram(context, job) {
                 }
                 return text;
               });
-              collectFromText(beforeHover, found);
-              const standalone = standaloneNumbers(beforeHover);
-              if (standalone.length === 1) found.views.push(standalone[0]);
+              collectFromText(beforeHover, trusted);
+              const standalone = standaloneNumbers(beforeHover).filter(n => n >= 10);
+              if (standalone.length === 1) trusted.views.push(standalone[0]);
+              else if (standalone.length > 1) trusted.views.push(Math.max(...standalone));
 
               await target.hover().catch(() => {});
               await profile.waitForTimeout(700);
               const afterHover = await target.evaluate(el => el.parentElement?.parentElement?.innerText || el.parentElement?.innerText || el.innerText || '');
-              collectFromText(afterHover, found);
+              collectFromText(afterHover, trusted);
             }
             await profile.close();
           } catch { /* a private profile or temporary challenge; try the next username */ }
-          if (best(found.views) !== null) break;
+          if (best(trusted.views) !== null || best(found.views) !== null) break;
         }
-        if (best(found.views) !== null) break;
+        if (best(trusted.views) !== null || best(found.views) !== null) break;
       }
     }
 
-    let likes = best(found.likes);
-    let views = best(found.views);
-    const comments = best(found.comments);
+    let likes = consensus(trusted.likes);
+    let views = best(trusted.views);
+    const comments = consensus(trusted.comments);
 
-    // Reliability filters: never store unrelated tiny page counters as Reel views.
-    if (views !== null && likes !== null && likes >= 20 && views < likes) views = null;
+    // Use weak target-context candidates only when target-specific sources did not expose a field.
+    if (likes === null) likes = consensus(found.likes);
+    if (views === null) views = best(found.views);
+
+    // Some Instagram payloads label both engagement numbers as like_count. When two clearly
+    // separated target-context values exist, the smaller engagement value is likes and the
+    // much larger one is the Reel play count. This also repairs the 817 / 857619 case safely.
+    if (views === null) {
+      const candidates = [...new Set([...trusted.likes, ...found.likes].filter(Number.isFinite).filter(n => n >= 10))].sort((a, b) => a - b);
+      if (candidates.length >= 2) {
+        const low = candidates[0];
+        const high = candidates[candidates.length - 1];
+        if (high >= Math.max(1_000, low * 8)) {
+          likes = low;
+          views = high;
+        }
+      }
+    }
+
+    // Reliability filters: never store unrelated tiny page counters or swap views/likes.
+    if (views !== null && likes !== null && likes >= 20 && views < likes) {
+      const swappedLooksPlausible = likes >= Math.max(1_000, views * 8);
+      if (swappedLooksPlausible) [views, likes] = [likes, views];
+      else views = null;
+    }
     if (views !== null && views <= 5 && (likes ?? job.currentLikes ?? 0) >= 20) views = null;
+    if (likes !== null && views !== null && likes > views) likes = null;
 
     if (likes === null && views === null) {
       throw new Error('Instagram did not expose reliable public likes/views in this run.');
     }
+
+    console.log(`  target candidates: likes=[${[...new Set(trusted.likes)].join(',')}] views=[${[...new Set(trusted.views)].join(',')}] weakLikes=[${[...new Set(found.likes)].slice(0, 8).join(',')}] weakViews=[${[...new Set(found.views)].slice(0, 8).join(',')}]`);
 
     return {
       views,
@@ -413,8 +537,10 @@ async function inspectInstagram(context, job) {
         pageTitle: pageData.title,
         checkedAt: new Date().toISOString(),
         usedSession: Boolean(SESSION_ID),
-        viewCandidates: found.views.length,
-        likeCandidates: found.likes.length,
+        viewCandidates: found.views.length + trusted.views.length,
+        likeCandidates: found.likes.length + trusted.likes.length,
+        trustedViews: [...new Set(trusted.views)].slice(0, 12),
+        trustedLikes: [...new Set(trusted.likes)].slice(0, 12),
       },
     };
   } finally {
