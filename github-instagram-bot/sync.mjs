@@ -232,6 +232,76 @@ async function inspectInstagram(context, job) {
 
     // A logged-in browser session can sometimes access the media info JSON for public posts.
     const shortcode = job.externalId || (job.url.match(/\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/i)?.[1] ?? '');
+
+    // Current Instagram web fallback (PolarisPostRootQuery). Instagram retired the older
+    // xdt_shortcode_media query in June 2026. Resolve the live document id from the page
+    // module when possible, then fall back to the current and previous known ids.
+    if (shortcode && best(found.views) === null) {
+      const graphqlDocIds = await page.evaluate(() => {
+        const ids = [];
+        try {
+          const live = globalThis.require?.('PolarisPostRootQuery')?.params?.id;
+          if (live) ids.push(String(live));
+        } catch { /* module is not available on every page variant */ }
+        ids.push('27128499623469141', '26130443479876713');
+        return [...new Set(ids.filter(Boolean))];
+      }).catch(() => ['27128499623469141', '26130443479876713']);
+
+      for (const docId of graphqlDocIds) {
+        try {
+          const graph = await page.evaluate(async ({ shortcode, docId }) => {
+            const cookie = Object.fromEntries(document.cookie.split(';').map(part => {
+              const index = part.indexOf('=');
+              return index < 0 ? [part.trim(), ''] : [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1))];
+            }));
+            let fbDtsg = '';
+            try { fbDtsg = String(globalThis.fb_dtsg || ''); } catch { /* ignore */ }
+            if (!fbDtsg) fbDtsg = document.querySelector('input[name="fb_dtsg"]')?.value || '';
+            if (!fbDtsg) {
+              const inline = [...document.scripts].map(s => s.textContent || '').join('\n');
+              fbDtsg = inline.match(/"DTSGInitialData"[^}]+"token"\s*:\s*"([^"]+)"/)?.[1]
+                || inline.match(/"token"\s*:\s*"([^"]+)"[^}]+"DTSGInitialData"/)?.[1]
+                || '';
+            }
+            const userId = cookie.ds_user_id || '0';
+            const body = new URLSearchParams({
+              av: userId,
+              __d: 'www',
+              __user: userId,
+              __a: '1',
+              __req: '1',
+              dpr: String(window.devicePixelRatio || 1),
+              __ccg: 'EXCELLENT',
+              fb_api_caller_class: 'RelayModern',
+              fb_api_req_friendly_name: 'PolarisPostRootQuery',
+              variables: JSON.stringify({ shortcode }),
+              doc_id: String(docId),
+            });
+            if (fbDtsg) body.set('fb_dtsg', fbDtsg);
+            const headers = {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'X-IG-App-ID': '936619743392459',
+              'X-FB-Friendly-Name': 'PolarisPostRootQuery',
+              'X-Requested-With': 'XMLHttpRequest',
+            };
+            if (cookie.csrftoken) headers['X-CSRFToken'] = cookie.csrftoken;
+            const response = await fetch('/api/graphql', {
+              method: 'POST',
+              headers,
+              body: body.toString(),
+              credentials: 'include',
+            });
+            return { status: response.status, text: await response.text() };
+          }, { shortcode, docId });
+          if (graph.status >= 200 && graph.status < 300) {
+            collectFromText(graph.text, found);
+            try { collectKnownNumbers(JSON.parse(graph.text), found); } catch { /* keep text candidates */ }
+          }
+        } catch { /* try the next GraphQL document id */ }
+        if (best(found.views) !== null) break;
+      }
+    }
+
     const mediaId = shortcodeToMediaId(shortcode);
     if (mediaId) {
       for (const endpoint of [
