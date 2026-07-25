@@ -1,11 +1,10 @@
-# Beitna Instagram statistics worker
+# Beitna Instagram Stats Bot v21
 
-This folder is uploaded to a separate GitHub repository together with `.github/workflows/instagram-stats.yml`.
-Do not upload `htdocs/config/config.php` or any website database password to GitHub.
+GitHub Actions + Playwright worker for updating public Instagram likes and Reel views.
 
-Required repository secrets:
-- `BEITNA_SITE_URL` — for example `https://example.com`
-- `BEITNA_CRON_SECRET` — exact same value as `BEITNA_GITHUB_SECRET` in `htdocs/config/platform-api.php`
+v21 adds multiple play-count fallbacks:
+- public page and network JSON
+- embed/legacy JSON variants
+- owner Reels-grid lookup for the same shortcode
 
-Optional:
-- `INSTAGRAM_SESSIONID` — a session cookie from an Instagram account you control. It can improve access to public posts, but it may expire. Never commit it to the repository.
+The worker preserves existing values whenever Instagram does not expose a reliable number.
