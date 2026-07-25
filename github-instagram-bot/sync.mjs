@@ -4,6 +4,7 @@ const SITE = String(process.env.BEITNA_SITE_URL || '').replace(/\/$/, '');
 const SECRET = String(process.env.BEITNA_CRON_SECRET || '');
 const SESSION_ID = String(process.env.INSTAGRAM_SESSIONID || '').trim();
 const LIMIT = Math.max(1, Math.min(100, Number(process.env.BATCH_LIMIT || 75)));
+const FORCE_SYNC = ['1', 'true', 'yes'].includes(String(process.env.FORCE_SYNC || '').trim().toLowerCase());
 
 if (!SITE || !SECRET) {
   throw new Error('Missing BEITNA_SITE_URL or BEITNA_CRON_SECRET GitHub secret.');
@@ -559,13 +560,15 @@ const context = await browser.newContext({
 apiPage = await context.newPage();
 await warmInfinityFreeSession(`${SITE}/`);
 
-const queue = await api(`/automation/instagram-jobs?limit=${LIMIT}`);
+const queue = await api(`/automation/instagram-jobs?limit=${LIMIT}&force=${FORCE_SYNC ? 1 : 0}`);
 if (!queue || queue.success !== true || !Array.isArray(queue.jobs)) {
   throw new Error(`Unexpected Beitna API response. Make sure the v19/v20 API folder is uploaded to the live site. Response: ${JSON.stringify(queue).slice(0, 800)}`);
 }
-console.log(`Received ${queue.count || 0} Instagram job(s). API server time: ${queue.serverTime || '-'}; candidates: ${queue.candidateCount ?? '-'}.`);
+console.log(`Received ${queue.count || 0} Instagram job(s). API server time: ${queue.serverTime || '-'}; candidates: ${queue.candidateCount ?? '-'}; force: ${queue.force ? 'yes' : 'no'}.`);
 if (!queue.jobs.length) {
-  throw new Error('No Instagram jobs were returned. Make sure Instagram links are enabled and saved in video_platform_records, then upload the v19/v20 API patch.');
+  console.log('No Instagram records are due right now. Scheduled run completed without changes.');
+  await browser.close();
+  process.exit(0);
 }
 
 if (SESSION_ID) {
