@@ -91,7 +91,7 @@ function toNumber(value) {
 }
 
 function collectKnownNumbers(value, out, depth = 0) {
-  if (depth > 18 || value == null) return;
+  if (depth > 22 || value == null) return;
   if (Array.isArray(value)) {
     for (const item of value) collectKnownNumbers(item, out, depth + 1);
     return;
@@ -101,13 +101,28 @@ function collectKnownNumbers(value, out, depth = 0) {
     const key = rawKey.toLowerCase();
     const n = typeof child === 'number' || typeof child === 'string' ? toNumber(String(child)) : null;
     if (n !== null) {
-      if (['like_count', 'likes_count', 'likecount'].includes(key)) out.likes.push(n);
-      if (['play_count', 'view_count', 'video_view_count', 'video_play_count', 'ig_play_count', 'clips_play_count'].includes(key)) out.views.push(n);
-      if (['comment_count', 'comments_count'].includes(key)) out.comments.push(n);
+      if (['like_count', 'likes_count', 'likecount', 'likes'].includes(key)) out.likes.push(n);
+      if ([
+        'play_count', 'plays_count', 'total_play_count', 'view_count', 'views_count', 'views', 'plays',
+        'video_view_count', 'video_views_count', 'video_play_count', 'ig_play_count', 'clips_play_count',
+        'reel_view_count', 'reels_view_count', 'clips_replays_count', 'video_view_play_count'
+      ].includes(key)) out.views.push(n);
+      if (['comment_count', 'comments_count', 'comments'].includes(key)) out.comments.push(n);
+    }
+    if ((key === 'owner' || key === 'user' || key === 'author') && child && typeof child === 'object') {
+      const username = String(child.username || child.user_name || '').trim();
+      if (username) out.usernames.unshift(username);
+    }
+    if ((key === 'username' || key === 'user_name') && typeof child === 'string' && /^[A-Za-z0-9._]{1,30}$/.test(child)) {
+      out.usernames.push(child);
     }
     if (key === 'edge_media_preview_like' && child && typeof child === 'object') {
       const count = toNumber(String(child.count ?? ''));
       if (count !== null) out.likes.push(count);
+    }
+    if ((key === 'edge_media_to_comment' || key === 'edge_media_preview_comment') && child && typeof child === 'object') {
+      const count = toNumber(String(child.count ?? ''));
+      if (count !== null) out.comments.push(count);
     }
     collectKnownNumbers(child, out, depth + 1);
   }
@@ -115,21 +130,41 @@ function collectKnownNumbers(value, out, depth = 0) {
 
 function collectFromText(text, out) {
   if (!text) return;
+  const source = String(text).replace(/\\u0022/g, '"').replace(/&quot;/g, '"');
   const patterns = [
-    ['likes', /(?:"like_count"|"likes_count"|"likeCount")\s*:\s*"?(\d+)"?/gi],
-    ['views', /(?:"play_count"|"view_count"|"video_view_count"|"video_play_count"|"ig_play_count"|"clips_play_count")\s*:\s*"?(\d+)"?/gi],
-    ['comments', /(?:"comment_count"|"comments_count")\s*:\s*"?(\d+)"?/gi],
+    ['likes', /["'](?:like_count|likes_count|likeCount|likes)["']\s*:\s*["']?([\d,.]+\s*[KkMm]?)/gi],
+    ['views', /["'](?:play_count|plays_count|total_play_count|view_count|views_count|views|plays|video_view_count|video_views_count|video_play_count|ig_play_count|clips_play_count|reel_view_count|clips_replays_count)["']\s*:\s*["']?([\d,.]+\s*[KkMm]?)/gi],
+    ['comments', /["'](?:comment_count|comments_count|comments)["']\s*:\s*["']?([\d,.]+\s*[KkMm]?)/gi],
+    ['likes', /\\"(?:like_count|likes_count|likeCount|likes)\\"\s*:\s*\\"?([\d,.]+\s*[KkMm]?)/gi],
+    ['views', /\\"(?:play_count|plays_count|total_play_count|view_count|views_count|views|plays|video_view_count|video_views_count|video_play_count|ig_play_count|clips_play_count|reel_view_count|clips_replays_count)\\"\s*:\s*\\"?([\d,.]+\s*[KkMm]?)/gi],
+    ['comments', /\\"(?:comment_count|comments_count|comments)\\"\s*:\s*\\"?([\d,.]+\s*[KkMm]?)/gi],
     ['likes', /([\d,.]+\s*[KkMm]?)\s+(?:likes?|إعجاب(?:ات)?)/gi],
-    ['views', /([\d,.]+\s*[KkMm]?)\s+(?:views?|plays?|مشاهد(?:ة|ات)?)/gi],
+    ['views', /([\d,.]+\s*[KkMm]?)\s+(?:views?|plays?|reproductions?|مشاهد(?:ة|ات)?|تشغيل(?:ات)?)/gi],
     ['comments', /([\d,.]+\s*[KkMm]?)\s+(?:comments?|تعليقات?)/gi],
+    ['likes', /(?:likes?|إعجاب(?:ات)?)\s*[:·-]?\s*([\d,.]+\s*[KkMm]?)/gi],
+    ['views', /(?:views?|plays?|مشاهد(?:ة|ات)?|تشغيل(?:ات)?)\s*[:·-]?\s*([\d,.]+\s*[KkMm]?)/gi],
   ];
   for (const [bucket, regex] of patterns) {
     let match;
-    while ((match = regex.exec(text)) !== null) {
+    while ((match = regex.exec(source)) !== null) {
       const n = toNumber(match[1]);
       if (n !== null) out[bucket].push(n);
     }
   }
+}
+
+function standaloneNumbers(text) {
+  const values = [];
+  for (const token of String(text || '').split(/\s+/)) {
+    const n = toNumber(token.replace(/[()]/g, ''));
+    if (n !== null) values.push(n);
+  }
+  return [...new Set(values)];
+}
+
+function cleanUsername(value) {
+  const username = String(value || '').replace(/^@/, '').trim();
+  return /^[A-Za-z0-9._]{1,30}$/.test(username) ? username : '';
 }
 
 function best(values) {
@@ -150,12 +185,12 @@ function shortcodeToMediaId(shortcode) {
 
 async function inspectInstagram(context, job) {
   const page = await context.newPage();
-  const found = { likes: [], views: [], comments: [] };
+  const found = { likes: [], views: [], comments: [], usernames: [] };
   const jsonResponses = [];
 
   page.on('response', async response => {
     const url = response.url();
-    if (!/instagram\.com\/(?:api\/v1\/media|graphql\/query|graphql\/web)/i.test(url)) return;
+    if (!/instagram\.com\/(?:api\/v1|api\/graphql|graphql|ajax)/i.test(url)) return;
     const type = response.headers()['content-type'] || '';
     if (!type.includes('json')) return;
     try { jsonResponses.push(await response.json()); } catch { /* response body may no longer be available */ }
@@ -170,13 +205,30 @@ async function inspectInstagram(context, job) {
       text: document.body?.innerText || '',
       meta: [...document.querySelectorAll('meta')].map(m => m.content || '').filter(Boolean).join('\n'),
       scripts: [...document.scripts].map(s => s.textContent || '').filter(Boolean).join('\n'),
+      html: document.documentElement?.innerHTML || '',
+      links: [...document.querySelectorAll('a[href]')].map(a => ({ href: a.getAttribute('href') || '', text: a.textContent || '', aria: a.getAttribute('aria-label') || '' })),
+      canonical: document.querySelector('link[rel="canonical"]')?.href || '',
       title: document.title || '',
     }));
     collectFromText(pageData.text, found);
     collectFromText(pageData.meta, found);
     collectFromText(pageData.scripts, found);
+    collectFromText(pageData.html, found);
 
     for (const payload of jsonResponses) collectKnownNumbers(payload, found);
+
+    // Owner username hints from the public page. These are later used to inspect the Reels grid,
+    // where Instagram often exposes the play count even when the permalink page only exposes likes.
+    const titleUsername = pageData.title.match(/^@?([A-Za-z0-9._]{1,30})\s+(?:on Instagram|• Instagram)/i)?.[1]
+      || pageData.meta.match(/@([A-Za-z0-9._]{1,30})/)?.[1]
+      || '';
+    if (titleUsername) found.usernames.unshift(titleUsername);
+    for (const link of pageData.links) {
+      const match = link.href.match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+      if (match && !['explore', 'accounts', 'reels', 'direct', 'about'].includes(match[1].toLowerCase())) {
+        found.usernames.push(match[1]);
+      }
+    }
 
     // A logged-in browser session can sometimes access the media info JSON for public posts.
     const shortcode = job.externalId || (job.url.match(/\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/i)?.[1] ?? '');
@@ -192,11 +244,81 @@ async function inspectInstagram(context, job) {
             headers: {
               'Accept': '*/*',
               'X-IG-App-ID': '936619743392459',
+              'X-ASBD-ID': '129477',
+              'X-Requested-With': 'XMLHttpRequest',
               'Referer': job.url,
             },
           });
           if (response.ok()) collectKnownNumbers(await response.json(), found);
         } catch { /* keep the public-page result */ }
+      }
+    }
+
+    // Instagram's embed and legacy JSON variants sometimes contain play_count/video_view_count
+    // even when the normal permalink only contains likes and comments.
+    const fallbackUrls = shortcode ? [
+      `https://www.instagram.com/reel/${shortcode}/embed/`,
+      `https://www.instagram.com/p/${shortcode}/embed/`,
+      `https://www.instagram.com/reel/${shortcode}/?__a=1&__d=dis`,
+      `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`,
+    ] : [];
+    for (const fallbackUrl of fallbackUrls) {
+      try {
+        const response = await context.request.get(fallbackUrl, {
+          timeout: 25_000,
+          headers: { 'Accept': '*/*', 'Referer': job.url, 'X-IG-App-ID': '936619743392459' },
+        });
+        const body = await response.text();
+        collectFromText(body, found);
+        try { collectKnownNumbers(JSON.parse(body), found); } catch { /* HTML or escaped JSON */ }
+      } catch { /* continue with the next public source */ }
+    }
+
+    // Last public fallback: locate the same Reel in the owner's Reels grid. The grid frequently
+    // exposes a standalone play count on the thumbnail although the permalink page does not.
+    if (shortcode && best(found.views) === null) {
+      const usernames = [...new Set(found.usernames.map(cleanUsername).filter(Boolean))].slice(0, 5);
+      for (const username of usernames) {
+        for (const profileUrl of [
+          `https://www.instagram.com/${username}/reels/`,
+          `https://www.instagram.com/${username}/`,
+        ]) {
+          try {
+            const profile = await context.newPage();
+            await profile.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 40_000 });
+            await profile.waitForTimeout(3_000);
+            let target = profile.locator(`a[href*="/reel/${shortcode}/"], a[href*="/p/${shortcode}/"]`).first();
+            for (let scroll = 0; scroll < 7 && await target.count() === 0; scroll += 1) {
+              await profile.mouse.wheel(0, 1800);
+              await profile.waitForTimeout(1_000);
+              target = profile.locator(`a[href*="/reel/${shortcode}/"], a[href*="/p/${shortcode}/"]`).first();
+            }
+            if (await target.count()) {
+              const beforeHover = await target.evaluate(el => {
+                let node = el;
+                let text = '';
+                for (let i = 0; i < 5 && node; i += 1, node = node.parentElement) {
+                  text += '\n' + (node.innerText || '') + '\n' + (node.getAttribute?.('aria-label') || '') + '\n' + (node.getAttribute?.('title') || '');
+                }
+                for (const child of el.querySelectorAll('[aria-label],[title]')) {
+                  text += '\n' + (child.getAttribute('aria-label') || '') + '\n' + (child.getAttribute('title') || '');
+                }
+                return text;
+              });
+              collectFromText(beforeHover, found);
+              const standalone = standaloneNumbers(beforeHover);
+              if (standalone.length === 1) found.views.push(standalone[0]);
+
+              await target.hover().catch(() => {});
+              await profile.waitForTimeout(700);
+              const afterHover = await target.evaluate(el => el.parentElement?.parentElement?.innerText || el.parentElement?.innerText || el.innerText || '');
+              collectFromText(afterHover, found);
+            }
+            await profile.close();
+          } catch { /* a private profile or temporary challenge; try the next username */ }
+          if (best(found.views) !== null) break;
+        }
+        if (best(found.views) !== null) break;
       }
     }
 
@@ -221,6 +343,8 @@ async function inspectInstagram(context, job) {
         pageTitle: pageData.title,
         checkedAt: new Date().toISOString(),
         usedSession: Boolean(SESSION_ID),
+        viewCandidates: found.views.length,
+        likeCandidates: found.likes.length,
       },
     };
   } finally {
